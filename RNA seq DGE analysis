@@ -1,0 +1,565 @@
+#### miR-34c-5p short-read transcriptome data analysis
+#### October 28th 2022 and going by MGC and TA
+
+
+
+
+###Set working directory
+
+setwd("C:/Users/arauj/Downloads/RNAseq Count Tables")
+
+
+
+###Install required packages
+
+BiocManager::install("edgeR")
+BiocManager::install("EnhancedVolcano")
+install.packages("biomaRt")
+install.packages("ggplot2")
+install.packages("DT")
+install.packages("DESeq2")
+install.packages("pheatmap")
+BiocManager::install("clusterProfiler")
+BiocManager::install("org.Hs.eg.db")
+
+###Load required packages
+
+library(edgeR)
+library(biomaRt)
+library(EnhancedVolcano)
+library(ggplot2)
+library(DT)
+library(DESeq2)
+library(pheatmap)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+###Load required files
+
+##Load count table for all samples
+
+#Get sample names
+samples <- c("D1A34.txt",	"D1AScr.txt",	"D2A34.txt",	"D2AScr.txt",	"D3A34.txt",	"D3AScr.txt")
+
+#Get gene IDs
+ID_table <- read.table("D1A34.txt", header=FALSE)
+colnames(ID_table) <- c("ensembl_ID", "D1A34")
+count_table <- as.data.frame(ID_table$ensembl_ID)
+colnames(count_table) <- c("ensembl_ID")
+
+#Get the actual files
+for (r in samples) {
+  rawcounts <- read.table(r, header = FALSE)
+  colnames(rawcounts) <- c("ensembl_ID", r)
+  count_table <-  merge(count_table, rawcounts, by = "ensembl_ID")
+}
+
+#Filter out header rows
+clean_count_table <- count_table[6:61864,]
+
+#Assign gene names as row names and sample names as column names
+rownames(clean_count_table) <- clean_count_table$ensembl_ID
+clean_count_table <- clean_count_table[,2:7]
+colnames(clean_count_table) <- c("D1A34",	"D1AScr",	"D2A34",	"D2AScr",	"D3A34",	"D3AScr")
+
+
+###Start differential gene expression analysis
+
+##Create an experimental design matrix
+exp.design <- data.frame(c("D1A34",	"D1AScr",	"D2A34",	"D2AScr",	"D3A34",	"D3AScr"))
+colnames(exp.design) <- "Sample"
+exp.design$donor <- c(rep("D1", 2), rep("D2", 2), rep("D3", 2))
+exp.design$treatment <- c('antagomir', 'scramble', 'antagomir', 'scramble', 'antagomir', 'scramble')
+donor <- factor(exp.design$donor, levels = c("D1", "D2", "D3"))
+treatment <- factor(exp.design$treatment, levels=c("scramble", "antagomir"))
+design <- model.matrix(~donor+treatment)
+
+
+##Create and filter a dgelist object
+dge <- DGEList(counts=clean_count_table)
+keep <- filterByExpr(dge, design)
+dge <- dge[keep,,keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge)
+
+##Normalize counts and fit to linear model
+v <- voom(dge, design = design)
+fit <- lmFit(v, design)
+fit2 <- eBayes(fit)
+
+##Get a result table
+coef <- topTable(fit2, p.value=1, number=nrow(fit2), coef="treatmentantagomir", adjust.method = "BH")
+
+##Retrieve gene names from biomaRt
+
+#Define dataset
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+#Define attributes
+attributes <- c("ensembl_gene_id", "external_gene_name", "entrezgene_id")
+
+#Get the information for the given genes
+values <- rownames(coef)
+gene_info <- getBM(attributes = attributes, filters = "ensembl_gene_id", values = values, mart = ensembl)
+
+#Remove duplicated rows
+gene_info <- gene_info[!duplicated(gene_info$ensembl_gene_id), ]
+
+##Create the final dataframe
+#Set the dataframe
+gene_info_df <- data.frame(external_gene_name = gene_info$external_gene_name, entrez_gene_id = gene_info$entrezgene_id, row.names = gene_info$ensembl_gene_id)
+matched_indices <- match(rownames(coef), rownames(gene_info_df))
+matched_gene_info <- gene_info_df[matched_indices, ]
+
+#Check and correct for missing values
+missing_genes <- setdiff(rownames(coef), rownames(gene_info_df))
+missing_gene_info <- data.frame(external_gene_name = missing_genes,entrez_gene_id = missing_genes)
+combined_gene_info <- rbind(matched_gene_info, missing_gene_info)
+
+#Join gene names to the dataframe
+combined_gene_info$ensembl_gene_id <- rownames(combined_gene_info)
+coef$ensembl_gene_id <- rownames(coef)
+coef <- merge(coef, combined_gene_info, by = "ensembl_gene_id", all.x = TRUE)
+rownames(coef) <- coef$ensembl_gene_id
+coef$ensembl_gene_id <- NULL  
+
+##Apply cutoff values to filter dataframe to only retain statistically relevant data
+#cutoff values were set to 20% fold change and 0.05 p value
+diffexpr<- as.data.frame(subset(coef, `P.Value` <= 0.05 & abs(logFC) > log2(1.2)))
+
+
+##Create a volcano plot
+
+#Set legends
+legends <- c("Not Significant", bquote(Log[2] ~ "Fold Change"), "p-Value", paste("Genes With Significantly", "Altered Expression", sep = "\n"))
+
+#Create the plot itself
+
+vvvvv <- EnhancedVolcano(coef,
+                         lab = coef$external_gene_name,
+                         #lab = "",
+                         x = "logFC",
+                         selectLab = c("KLF10", "NR4A2", "TGFB1", "SMAD7", "SOCS1", "SOCS2", "SOCS3", "TNF", "OSM", "IL24", "CISH", "JUN", "FOXP3", "NFKBIA"),
+                         y = "P.Value",
+                         max.overlaps = Inf,
+                         xlim = c(-3, 3),
+                         ylim = c(0, 3),
+                         pCutoff = 0.05,
+                         FCcutoff = 0.26,
+                         axisLabSize = 15,
+                         title = '',
+                         pointSize = 1.5,
+                         labSize = 5,
+                         subtitle = '',
+                         titleLabSize = 10,
+                         caption= "",
+                         legendLabels = legends,  # legends
+                         legendPosition = "right",
+                         legendLabSize = 15,
+                         legendIconSize = 5,
+                         lengthConnectors = unit(0.2, "npc"),  # Adjust the length of connectors
+                         widthConnectors = 1,
+                         min.segment.length = unit(0.1, "in"),  # Adjust the minimum segment length
+                         drawConnectors = TRUE
+)
+
+vvvvv
+
+ggsave("volcanoplot.png", vvvvv, width = 9, height = 5, dpi = 700)
+
+###Filter out genes because of gender bias because of x inactivation escape
+
+#Create a count dataframe with the filtered genes
+counts <- as.data.frame(clean_count_table[rownames(coef),])
+#Load differentially expressed genes between XX containing people and XY containing people
+load("GenderGenes.RData")
+#get the gene lists for each gender
+Y <- gene_info_df$entrez_gene_id %in% msYgenes
+X <- gene_info_df$entrez_gene_id %in% XiEgenes
+index <- list(Y = Y, X = X)
+malelist <- gene_info_df$entrez_gene_id[Y]
+femalelist <- gene_info_df$entrez_gene_id[X]
+male_genes <- gene_info_df$external_gene_name[match(malelist, gene_info_df$entrez_gene_id)]
+female_genes <- gene_info_df$external_gene_name[match(femalelist, gene_info_df$entrez_gene_id)]
+#create the data frame
+male_gene_list <- data.frame(External_Gene_Name = male_genes, Entrez_Gene_ID = malelist)
+female_gene_list <- data.frame(External_Gene_Name = female_genes, Entrez_Gene_ID = femalelist)
+
+
+###Get the predicted targets from mirDIP and cross the data frames
+##Get the predicted targets at various confidence levels 
+tabelamirdiplow <- read.table("mirdip.txt",sep = "\t", header = TRUE, stringsAsFactors = FALSE, skip = 13)
+tabelamirdipmedium <- tabelamirdiplow[tabelamirdiplow[,7] != "Low", ]
+tabelamirdiphigh <- tabelamirdipmedium[tabelamirdipmedium[,7] != "Medium", ]
+tabelamirdipvhigh <- tabelamirdiphigh[tabelamirdiphigh[,7] != "High", ]
+
+##Get the predicted targets in the differentially expressed genes
+cruzadomirdiplow <- diffexpr[as.vector(diffexpr[, 7]) %in% as.vector(tabelamirdiplow[, 1]), ]
+cruzadomirdipmedium <- diffexpr[as.vector(diffexpr[, 7]) %in% as.vector(tabelamirdipmedium[, 1]), ]
+cruzadomirdiphigh <- diffexpr[as.vector(diffexpr[, 7]) %in% as.vector(tabelamirdiphigh[, 1]), ]
+cruzadomirdipvhigh <- diffexpr[as.vector(diffexpr[, 7]) %in% as.vector(tabelamirdipvhigh[, 1]), ]
+
+##Get the predicted targets in the differentially upregulated genes
+cruzadomirdipuplow <- cruzadomirdiplow[cruzadomirdiplow$logFC > 0,]
+cruzadomirdipupmedium <- cruzadomirdipmedium[cruzadomirdipmedium$logFC > 0,]
+cruzadomirdipuphigh <- cruzadomirdiphigh[cruzadomirdiphigh$logFC > 0,]
+cruzadomirdipupvhigh <- cruzadomirdipvhigh[cruzadomirdipvhigh$logFC > 0,]
+
+##Get the predicted targets in the differentially downregulated genes
+cruzadomirdipdownlow <- cruzadomirdiplow[cruzadomirdiplow$logFC < 0,]
+cruzadomirdipdownmedium <- cruzadomirdipmedium[cruzadomirdipmedium$logFC < 0,]
+cruzadomirdipdownhigh <- cruzadomirdiphigh[cruzadomirdiphigh$logFC < 0,]
+cruzadomirdipdownvhigh <- cruzadomirdipvhigh[cruzadomirdipvhigh$logFC < 0,]
+
+##Greate a dataframe with the genes not differentially expressed
+ns <- coef[!(coef$t %in% diffexpr$t),]
+
+##Get the predicted targets in the not significantly altered genes
+cruzadomirdiplowns <- ns[as.vector(ns[, 7]) %in% as.vector(tabelamirdiplow[, 1]), ]
+cruzadomirdipmediumns <- ns[as.vector(ns[, 7]) %in% as.vector(tabelamirdipmedium[, 1]), ]
+cruzadomirdiphighns <- ns[as.vector(ns[, 7]) %in% as.vector(tabelamirdiphigh[, 1]), ]
+cruzadomirdipvhighns <- ns[as.vector(ns[, 7]) %in% as.vector(tabelamirdipvhigh[, 1]), ]
+
+##Get the predicted targets in all genes
+cruzadomirdiplowcoef <- coef[as.vector(coef[, 7]) %in% as.vector(tabelamirdiplow[, 1]), ]
+cruzadomirdipmediumcoef <- coef[as.vector(coef[, 7]) %in% as.vector(tabelamirdipmedium[, 1]), ]
+cruzadomirdiphighcoef <- coef[as.vector(coef[, 7]) %in% as.vector(tabelamirdiphigh[, 1]), ]
+cruzadomirdipvhighcoef <- coef[as.vector(coef[, 7]) %in% as.vector(tabelamirdipvhigh[, 1]), ]
+
+##Get the predicted targets in the upregulated genes
+cruzadomirdipuplowcoef <- cruzadomirdiplowcoef[cruzadomirdiplowcoef$logFC > 0,]
+cruzadomirdipupmediumcoef <- cruzadomirdipmediumcoef[cruzadomirdipmediumcoef$logFC > 0,]
+cruzadomirdipuphighcoef <- cruzadomirdiphighcoef[cruzadomirdiphighcoef$logFC > 0,]
+cruzadomirdipupvhighcoef <- cruzadomirdipvhighcoef[cruzadomirdipvhighcoef$logFC > 0,]
+
+##Get the predicted targets in the downregulated genes
+cruzadomirdipdownlowcoef <- cruzadomirdiplowcoef[cruzadomirdiplowcoef$logFC < 0,]
+cruzadomirdipdownmediumcoef <- cruzadomirdipmediumcoef[cruzadomirdipmediumcoef$logFC < 0,]
+cruzadomirdipdownhighcoef <- cruzadomirdiphighcoef[cruzadomirdiphighcoef$logFC < 0,]
+cruzadomirdipdownvhighcoef <- cruzadomirdipvhighcoef[cruzadomirdipvhighcoef$logFC < 0,]
+
+
+###Create a PCA plot
+
+##get and normalize data
+coldata <- data.frame(
+  SampleName = c("d1a34","d1ascr","d2a34","d2ascr","d3a34","d3ascr"),  # Sample names/IDs
+  Treatment = c("A34c", "AScr", "A34c", "AScr", "A34c", "AScr"), # Experimental conditions
+  Donor = c("Donor 1", "Donor 1", "Donor 2", "Donor 2", "Donor 3", "Donor 3"),         # Batch information
+  stringsAsFactors = FALSE)
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design= ~ Treatment + Donor)
+dds <- DESeq(dds)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+vsd <- vst(dds, blind=FALSE)
+norm_counts <- assay(vsd)
+ntd <- normTransform(dds)
+
+##Create plot
+pca_plot <- plotPCA(ntd, intgroup=c("Treatment", "Donor"), returnData = TRUE)
+
+##Change visuals
+pca_plot_with_shapes <- ggplot(pca_plot, aes(x = PC1, y = PC2, shape = Treatment, fill = Donor)) +
+  geom_point(size = 6, aes(stroke = 1.5)) +  # Set point size
+  scale_shape_manual(values = c(21, 24)) +
+  scale_fill_discrete(type = c("royalblue3", "chartreuse3", "darkorange"))+
+  theme_minimal() +  # Sets a minimal theme as a starting point
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),  # Set background to white
+    panel.grid.major = element_line(color = "gray", size = 0.75),
+    legend.position = "bottom",
+    legend.title = element_text(size = 16),  # Increase legend title size
+    legend.text = element_text(size = 14),   # Increase legend text size
+    axis.title = element_text(size = 18),    # Increase axis title size
+    axis.text = element_text(size = 14)  )+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),  # Ensure the fill legend shows correctly
+    shape = guide_legend(override.aes = list(fill = "black"))  # Ensure the shape legend appears properly
+  )
+pca_plot_with_shapes
+
+ggsave("pca_plot_with_shapes.png", pca_plot_with_shapes, width = 8, height = 6, dpi = 300)
+
+
+###Heatmap
+
+##Standard
+#Get data
+diff_expression_df <- as.data.frame(clean_count_table[rownames(coef), ])
+heatdata <- log2(diff_expression_df[rownames(diff_expression_df) %in% rownames(diffexpr),]+1)
+
+#Create heatmap
+genesheat <- pheatmap(
+  heatdata,
+  color = colorRampPalette(c("green", "black", "red"))(100),  
+  main = "Gene Expression Heatmap",  
+  xlab = "Samples",  
+  ylab = "Genes",     
+  cluster_cols = TRUE,
+  show_rownames = FALSE,
+  angle_col = 0,
+  annotation_legend_title = "z-value"
+)
+
+##Forced clustering
+
+#Select column order
+custom_column_order <- c(2, 4, 6, 1, 3, 5)
+ordered_heatdata <- heatdata[, custom_column_order]
+heatdata2 <- scale(ordered_heatdata)
+
+#Create heatmap
+genesheat <- pheatmap(
+  heatdata2,
+  color = colorRampPalette(c("green", "black", "red"))(100),  
+  main = "Gene Expression Heatmap",  
+  xlab = "Samples",  
+  ylab = "Genes",     
+  cluster_cols = FALSE,
+  show_rownames = FALSE,
+  angle_col = 0,
+  annotation_legend_title = "z-value"
+)
+
+##Calculate average
+heatdata2 <- as.data.frame(heatdata2)
+heatdata2$average <- rowMeans(as.data.frame(heatdata2))
+
+##Heatmap with colorblind adapted colors
+genesheat2 <- pheatmap(
+  heatdata2,
+  main = "Gene Expression Heatmap",  
+  xlab = "Samples",  
+  ylab = "Genes",    
+  cluster_cols = TRUE,
+  show_rownames = FALSE,
+  cluster_rows = TRUE,
+  angle_col = 0,
+  treeheight_row = 0,
+  fontsize_col = 8
+)
+
+
+###Upregulated genes
+upregulated <- diffexpr[diffexpr$logFC > 0,]
+
+###Downregulared genes
+downregulated <- diffexpr[diffexpr$logFC < 0,]
+
+
+
+###Functional enrichment analysis
+
+##Get the GO terms
+go_results <- enrichGO(
+  gene = rownames(diffexpr),
+  OrgDb = org.Hs.eg.db,  
+  keyType = "ENSEMBL",   
+  ont = "BP",            
+  pAdjustMethod = "BH",  
+  pvalueCutoff = 1   
+)
+
+#Summarize results
+summary(go_results)
+
+#Draw a dotplot
+dotplot(go_results, showCategory = 20, x = "count", color = "pvalue", font.size = 8)
+
+#Turn results into a dataframe
+go_results_df <- as.data.frame(go_results)
+
+##Functional enrichment of the upregulated genes
+goresultsup <- enrichGO(
+  gene = rownames(upregulated),
+  OrgDb = org.Hs.eg.db,  
+  keyType = "ENSEMBL",  
+  ont = "BP",            
+  pAdjustMethod = "BH",  
+  pvalueCutoff = 0.1   
+)
+
+#Create a dotplot
+dotplot(goresultsup, showCategory = 20, x = "count", color = "pvalue", font.size = 8)
+
+##Functional enrichment of the downregulated genes
+goresultsdown <- enrichGO(
+  gene = rownames(downregulated),
+  OrgDb = org.Hs.eg.db,  
+  keyType = "ENSEMBL",  
+  ont = "BP",         
+  pAdjustMethod = "BH",  
+  pvalueCutoff = 0.1   
+)
+
+#Create a dotplot
+dotplot(goresultsdown, showCategory = 20, x = "count", color = "pvalue", font.size = 8)
+
+##Dotplot for the chosen GO terms 
+
+#Get a dataframe to visualize and choose the most interesting terms to show
+goresultsupdf <- as.data.frame(goresultsup)
+
+funcenr <- ggplot(go_results_df[c(1,10,8,2,3,14,48,8,9),], 
+                  aes(x = Count, y = reorder(Description, p.adjust), color = p.adjust)) +
+  geom_point(size = 5) +  # Increase point size
+  scale_color_gradient(
+    name = "Adjusted p-value",
+    low = "blue",   
+    high = "red"   
+  ) +
+  geom_segment(aes(xend = 0, yend = reorder(Description, p.adjust)), linetype = "solid") +
+  labs(
+    x = "Number of genes associated", 
+    y = "GO term", 
+    title = "Gene Ontology Analysis"
+  ) +
+  theme_minimal(base_size = 15) +  # Increase base size of all text elements
+  theme(
+    axis.title.x = element_text(size = 16),  # X-axis title size
+    axis.title.y = element_text(size = 16),  # Y-axis title size
+    axis.text.x = element_text(size = 14),   # X-axis labels size
+    axis.text.y = element_text(size = 14),   # Y-axis labels size
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Plot title size and centering
+    legend.title = element_text(size = 12),  # Legend title size
+    legend.text = element_text(size = 12)    # Legend text size
+  )
+
+ggsave("functionalenrichment.png", funcenr, width = 10, height = 4, dpi = 700)
+
+
+
+funcenrup <- ggplot(goresultsdf[c(1,2,4,6,7,8,9,10,11),], 
+                  aes(x = Count, y = reorder(Description, p.adjust), color = p.adjust)) +
+  geom_point(size = 5) +  # Increase point size
+  scale_color_gradient(
+    name = "Adjusted p-value",
+    low = "blue",   
+    high = "red"   
+  ) +
+  geom_segment(aes(xend = 0, yend = reorder(Description, p.adjust)), linetype = "solid") +
+  labs(
+    x = "Number of genes associated", 
+    y = "GO term", 
+    title = "Gene Ontology Analysis"
+  ) +
+  theme_minimal(base_size = 15) +  # Increase base size of all text elements
+  theme(
+    axis.title.x = element_text(size = 16),  # X-axis title size
+    axis.title.y = element_text(size = 16),  # Y-axis title size
+    axis.text.x = element_text(size = 14),   # X-axis labels size
+    axis.text.y = element_text(size = 14),   # Y-axis labels size
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Plot title size and centering
+    legend.title = element_text(size = 12),  # Legend title size
+    legend.text = element_text(size = 12)    # Legend text size
+  )
+funcenrup
+ggsave("functionalenrichment.png", funcenrup, width = 10, height = 4, dpi = 700)
+
+
+
+###Perform statiscical analysis of the relevance of each subset
+#Define four subsets in each dataset
+subset1_1 <- coef$external_gene_name
+subset1_2 <- diffexpr$external_gene_name
+subset1_3 <- upregulated$external_gene_name
+subset1_4 <- downregulated$external_gene_name
+
+subset2_1 <- tabelamirdiplow$Gene.Symbol
+subset2_2 <- tabelamirdipmedium$Gene.Symbol
+subset2_3 <- tabelamirdiphigh$Gene.Symbol
+subset2_4 <- tabelamirdipvhigh$Gene.Symbol
+
+##Define a function to perform the hypergeometric test
+perform_hypergeometric_test <- function(subset1, subset2, universe) {
+  common_genes <- intersect(subset1, subset2)
+  hypergeom_result <- phyper(length(common_genes) - 1, length(subset1), length(setdiff(universe, subset1)), length(universe), lower.tail = FALSE)
+  return(hypergeom_result)
+}
+
+
+
+for (i in 1:4) {
+  for (j in 1:4) {
+    subset_name_1 <- paste0("subset1_", i)
+    subset_name_2 <- paste0("subset2_", j)
+    subset1 <- get(subset_name_1)
+    subset2 <- get(subset_name_2)
+    options(digits = 10)
+    p_value <- format(perform_hypergeometric_test(subset1, subset2, nrow(coef)), scientific = TRUE)
+    cat("hypergeometric test between", subset_name_1, "and", subset_name_2, "p-value:", p_value, "\n")
+  }
+}
+
+
+
+
+##Create a significance matrix
+
+#Create an empty matrix to store data
+p_value_matrix <- matrix(NA, nrow = 4, ncol = 4, dimnames = list(paste0("subset2_", 1:4), paste0("subset1_", 1:4)))
+
+#Perform the tests and fill in the matrix
+for (i in 1:4) {
+  for (j in 1:4) {
+    subset_name_1 <- paste0("subset1_", i)
+    subset_name_2 <- paste0("subset2_", j)
+    subset1 <- get(subset_name_1)
+    subset2 <- get(subset_name_2)
+    p_value <- perform_hypergeometric_test(subset1, subset2, nrow(coef))
+    p_value_matrix[j, i] <- p_value
+  }
+}
+
+#Turn into dataframe
+p_value_df <- as.data.frame(p_value_matrix)
+
+#Create a function to format the dataframe
+format_p_values <- function(p_value) {
+  if (p_value > 0.05) {
+    return(sprintf('<span style="color:red">%0.10f</span>', p_value))
+  } else {
+    return(sprintf('%0.10f', p_value))
+  }
+}
+
+#Apply the function
+formatted_p_value_df <- p_value_df
+for (i in 1:nrow(formatted_p_value_df)) {
+  for (j in 1:ncol(formatted_p_value_df)) {
+    formatted_p_value_df[i, j] <- format_p_values(p_value_df[i, j])
+  }
+}
+
+# Render the data table
+datatable(p_value_df, options = list(pageLength = 5, autoWidth = FALSE)) %>%
+  formatStyle(
+    columns = colnames(p_value_df),
+    backgroundColor = styleInterval(0.05, c("white", "red")),
+    color = styleInterval(0.05, c("black", "white"))
+  )
+
+
+
+
+#number of detected genes
+detected_genesillumina <- rownames(clean_count_table[
+      clean_count_table$D1A34 != 0 |
+      clean_count_table$D1AScr != 0 |
+      clean_count_table$D2A34 != 0 |
+      clean_count_table$D2AScr != 0 |
+      clean_count_table$D3A34 != 0 |
+      clean_count_table$D3AScr != 0 
+
+  
+,])
+detectedd1a34 <- sum(clean_count_table$D1A34 !=0)
+detectedd1ascr <- sum(clean_count_table$D1AScr !=0)
+detectedd2a34 <- sum(clean_count_table$D2A34 !=0)
+detectedd2aScr <- sum(clean_count_table$D2AScr !=0)
+detectedd3a34 <- sum(clean_count_table$D3A34 !=0)
+detectedd3aScr <- sum(clean_count_table$D3AScr !=0)
+
+averagedetectedpergene <- mean(c(detectedd1a34,detectedd1ascr,detectedd2a34,detectedd2aScr,detectedd3a34,detectedd3aScr))
