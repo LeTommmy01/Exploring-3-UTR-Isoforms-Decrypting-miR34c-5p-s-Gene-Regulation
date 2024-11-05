@@ -1,0 +1,1601 @@
+
+
+###### script nanopore analysis
+
+
+setwd("C:/Users/arauj/Downloads/nanoporenovo")
+
+
+##### download required packages
+
+BiocManager::install("Rsamtools")
+install.packages("rtracklayer")
+install.packages("data.table")
+install.packages("dplyr")
+install.packages("tidyr")
+install.packages("biomaRt")
+install.packages("ggplot2")
+
+
+
+##### load required packages
+
+library(Rsamtools)
+library(data.table)
+library(rtracklayer)
+library(tidyr)
+library(data.table)
+library(dplyr)
+library(biomaRt)
+library(ggplot2)
+
+
+
+##### load required files
+
+alignmentfilespath <- c("sorted01working.bam", "sorted02working.bam", "sorted03working.bam", "sorted04working.bam", "sorted05working.bam")
+alignmentfiles <- list()
+for (file in alignmentfilespath) {
+  alignmentfiles[[file]] <- scanBam(file)
+}
+
+humanpas <- fread("human.PAS.txt", header = TRUE, sep = "\t")
+
+
+
+
+
+mrelinglnc <- as.data.frame(fread("34ctargets.txt", header = FALSE, sep = "\t"))
+mremrna <- as.data.frame(fread("34ctargetsmrna.txt", header = FALSE, sep = "\t"))
+
+
+
+
+
+
+
+
+### create a function to turn bam files to dataframes
+
+bam_to_dataframe <- function(bam_obj) {
+  data <- data.frame(
+    chr = bam_obj[[1]][["qname"]],
+    pos = bam_obj[[1]][["pos"]],
+    cigar = bam_obj[[1]][["cigar"]],
+    strand = bam_obj[[1]][["strand"]],
+    rname = bam_obj[[1]][["rname"]],
+    stringsAsFactors = FALSE)
+  return(data)
+}
+
+# Initialize an empty list to store data frames for each sample
+
+sample_dataframes <- list()
+
+
+# Iterate over bam file objects and create data frames for each sample
+
+for (i in seq_along(alignmentfiles)) {
+  sample_name <- paste0("sample", i)  # Sample name
+  bam_obj <- alignmentfiles[[i]]  # Get BAM file object
+  sample_dataframes[[sample_name]] <- bam_to_dataframe(bam_obj)
+}
+
+
+##### now to filter out the incomplete reads
+
+completereadnames <- list()
+
+
+# iterate over each sample and read the read names into a vector
+
+for (i in 1:5) {
+  file_name <- sprintf("readnamescomplete%02d.txt", i)
+  read_names <- readLines(file_name)
+  completereadnames[[paste0("sample", i)]] <- read_names
+}
+
+# create an empty list
+
+filtered_alignment_list <- list()
+
+# iterate over the list to add the complete reads to the empty list
+
+for (i in 1:5) {
+  alignment_info <- sample_dataframes[[i]]
+  read_names <- completereadnames[[i]]
+  filtered_alignment <- alignment_info[alignment_info$chr %in% read_names, ]
+  filtered_alignment_list[[paste0("sample", i)]] <- filtered_alignment
+}
+
+
+
+# define a function to calculate the rightmost position
+
+calculate_rightmost_position <- function(df) {
+  for (i in 1:nrow(df)) {
+    cigars <- df$cigar[i]
+    cigar_parts <- gregexpr("(\\d+)([MIDNSHP=X])", cigars, perl=TRUE)
+    cigar_matches <- regmatches(cigars, cigar_parts)[[1]]
+    rightmost_position <- df$pos[i]
+    for (match in cigar_matches) {
+      length <- as.numeric(sub("(\\d+).*", "\\1", match))
+      operation <- sub("\\d+", "", match)
+      if (operation %in% c("M", "D", "N", "=", "X")) {
+        rightmost_position <- rightmost_position + length
+      }
+    }
+    df$end[i] <- rightmost_position
+  }
+  
+  return(df)
+}
+
+
+
+# separate reads on the sense and antisense strands
+
+positive_strand_list <- lapply(filtered_alignment_list, function(df) df[df$strand == '+', ])
+negative_strand_list <- lapply(filtered_alignment_list, function(df) df[df$strand == '-', ])
+
+
+# for the reads on the antisense strand, the end position is the left-most position
+
+for (i in seq_along(negative_strand_list)) {
+  negative_strand_list[[i]]$end <- negative_strand_list[[i]]$pos
+}
+
+
+# for reads on the sense strand, the end position is the right-most position
+
+for (i in seq_along(positive_strand_list)) {
+  positive_strand_list[[i]] <- calculate_rightmost_position(positive_strand_list[[i]])
+}
+
+
+
+
+####### checkpoint
+
+write.csv(negative_strand_list[[1]], "negativebarcode01end.csv")
+write.csv(negative_strand_list[[2]], "negativebarcode02end.csv")
+write.csv(negative_strand_list[[3]], "negativebarcode03end.csv")
+write.csv(negative_strand_list[[4]], "negativebarcode04end.csv")
+write.csv(negative_strand_list[[5]], "negativebarcode05end.csv")
+
+write.csv(positive_strand_list[[1]], "positivebarcode01end.csv")
+write.csv(positive_strand_list[[2]], "positivebarcode02end.csv")
+write.csv(positive_strand_list[[3]], "positivebarcode03end.csv")
+write.csv(positive_strand_list[[4]], "positivebarcode04end.csv")
+write.csv(positive_strand_list[[5]], "positivebarcode05end.csv")
+
+
+
+negendfiles <- c("negativebarcode01end.csv", "negativebarcode02end.csv", "negativebarcode03end.csv", "negativebarcode04end.csv", "negativebarcode05end.csv")
+listofnegativedfs <- list()
+for (file in negendfiles) {
+  df_name <- gsub(".csv", "", basename(file))
+  listofnegativedfs[[df_name]] <- read.csv(file)
+}
+
+endfiles <- c("positivebarcode01end.csv", "positivebarcode02end.csv", "positivebarcode03end.csv", "positivebarcode04end.csv", "positivebarcode05end.csv") 
+listofpositivedfs <- list()
+for (file in endfiles) {
+  df_name <- gsub(".csv", "", basename(file))
+  listofpositivedfs[[df_name]] <- read.csv(file)
+}
+
+####### end checkpoint
+
+
+
+### join the dataframes
+
+stacked_list <- list()
+
+for (i in 1:5) {
+  stacked_df <- rbind(listofpositivedfs[[i]], listofnegativedfs[[i]])
+  name <- paste("barcode0", i, sep = "")
+  stacked_list[[name]] <- stacked_df
+}
+
+
+
+#filter the dataframes
+
+for(i in seq_along(stacked_list)){
+  stacked_list[[i]] <- stacked_list[[i]][!is.na(stacked_list[[i]]$end),]
+}
+
+
+# convert chromosome names
+
+chromosome_map <- c(
+  "NC_000001.11" = "chr1",
+  "NC_000002.12" = "chr2",
+  "NC_000003.12" = "chr3",
+  "NC_000004.12" = "chr4",
+  "NC_000005.10" = "chr5",
+  "NC_000006.12" = "chr6",
+  "NC_000007.14" = "chr7",
+  "NC_000008.11" = "chr8",
+  "NC_000009.12" = "chr9",
+  "NC_000010.11" = "chr10",
+  "NC_000011.10" = "chr11",
+  "NC_000012.12" = "chr12",
+  "NC_000013.11" = "chr13",
+  "NC_000014.9" = "chr14",
+  "NC_000015.10" = "chr15",
+  "NC_000016.10" = "chr16",
+  "NC_000017.11" = "chr17",
+  "NC_000018.10" = "chr18",
+  "NC_000019.10" = "chr19",
+  "NC_000020.11" = "chr20",
+  "NC_000021.9" = "chr21",
+  "NC_000022.11" = "chr22",
+  "NC_000023.11" = "chrX",
+  "NC_000024.10" = "chrY"
+)
+
+
+# create a function to transform the chromosome names
+
+map_chromosome <- function(df, chromosome_map) {
+  df$rname <- chromosome_map[df$rname]
+  return(df)
+}
+
+
+for (i in seq_along(stacked_list)) {
+  stacked_list[[i]] <- map_chromosome(stacked_list[[i]], chromosome_map)
+  }
+
+
+
+#take out the alignments outside the chromosomes
+
+for (i in seq_along(stacked_list)){
+  stacked_list[[i]] <- stacked_list[[i]][!is.na(stacked_list[[i]]$rname),]
+}
+
+
+## save the dataframes
+
+write.csv(stacked_list[[1]], "barcode01.csv")
+write.csv(stacked_list[[2]], "barcode02.csv")
+write.csv(stacked_list[[3]], "barcode03.csv")
+write.csv(stacked_list[[4]], "barcode04.csv")
+write.csv(stacked_list[[5]], "barcode05.csv")
+
+barcode01 <- read.csv("barcode01.csv")
+barcode02 <- read.csv("barcode02.csv")
+barcode03 <- read.csv("barcode03.csv")
+barcode04 <- read.csv("barcode04.csv")
+barcode05 <- read.csv("barcode05.csv")
+
+
+
+
+
+
+
+
+##### treat pas annotation
+
+
+### convert from grch37 to grch38
+
+
+#load a chain file
+
+chain_file <- "hg19ToHg38.over.chain"
+chain <- import.chain(chain_file)
+
+
+# turn positions to numeric characters 
+
+humanpas$pos <- as.numeric(humanpas$pos)
+
+
+# Convert to GRanges object, treating pos as single base pair range
+
+gr <- GRanges(
+  seqnames = humanpas$Chromosome,
+  ranges = IRanges(start = humanpas$Position, end = humanpas$Position),
+  strand = humanpas$Strand
+)
+
+
+# Perform LiftOver
+
+lifted <- liftOver(gr, chain)
+
+lifted <- sapply(lifted, function(x) {
+  if (length(x) > 0) {
+    return(start(x)[1])
+  } else {
+    return(NA)
+  }
+})
+
+
+# Convert lifted GRanges to a data frame
+
+lifted_df <- as.data.frame(lifted)
+
+
+# Match lifted coordinates back to original humanpas dataframe
+
+humanpas_lifted <- humanpas
+humanpas_lifted$pos_hg38 <- lifted_df
+humanpas_lifted <- humanpas_lifted[!is.na(humanpas_lifted$pos_hg38)]
+
+
+
+
+
+###### fit the reads to their isoform
+
+
+# Initialize the description data frame with the correct number of rows and a dummy column
+
+description <- data.frame(num = 1:311399)
+
+
+# Ensure the Position column is numeric and assign it to description
+
+description$Position <- as.numeric(as.character(humanpas_lifted$pos_hg38))
+
+
+# Remove the initial dummy column
+
+description$num <- NULL
+
+
+# Create columns for Position - 10 and Position + 10
+
+description$Position_minus_10 <- description$Position - 10
+description$Position_plus_10 <- description$Position + 10
+
+
+# Add a column for the reads from the first sample
+
+description$NumCellsInRange01 <- 0
+for (read_position in barcode01$end) {
+  within_range <- (read_position >= description$Position_minus_10) & (read_position <= description$Position_plus_10)
+  description$NumCellsInRange01[within_range] <- description$NumCellsInRange01[within_range] + 1
+}
+
+
+# Add a column for the reads from the second sample
+
+# Initialize a new column for the number of cells
+description$NumCellsInRange02 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in barcode02$rightmostposition) {
+  within_range <- (read_position >= description$Position_minus_10) & (read_position <= description$Position_plus_10)
+  description$NumCellsInRange02[within_range] <- description$NumCellsInRange02[within_range] + 1
+}
+
+
+# Add a column for the reads from the third sample
+
+# Initialize a new column for the number of cells
+description$NumCellsInRange03 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in barcode03$rightmostposition) {
+  within_range <- (read_position >= description$Position_minus_10) & (read_position <= description$Position_plus_10)
+  description$NumCellsInRange03[within_range] <- description$NumCellsInRange03[within_range] + 1
+}
+
+
+
+# Add a column for the reads from the fourth sample
+
+# Initialize a new column for the number of cells
+description$NumCellsInRange04 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in barcode04$rightmostposition) {
+  within_range <- (read_position >= description$Position_minus_10) & (read_position <= description$Position_plus_10)
+  description$NumCellsInRange04[within_range] <- description$NumCellsInRange04[within_range] + 1
+}
+
+
+
+# Add a column for the reads from the fifth sample
+
+# Initialize a new column for the number of cells
+description$NumCellsInRange05 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in barcode05$rightmostposition) {
+  within_range <- (read_position >= description$Position_minus_10) & (read_position <= description$Position_plus_10)
+  description$NumCellsInRange05[within_range] <- description$NumCellsInRange05[within_range] + 1
+}
+
+
+
+# Transform the position column to integer
+
+description$Position <- as.integer(description$Position)
+
+
+#add the dataframes together
+
+isoforms <- cbind(humanpas_lifted, description[, -1])
+
+
+# Change the column names and filter to only keep the relevant ones
+
+simpisoforms <- isoforms[,c("Chromosome","Strand", "pos_hg38", "Gene.Symbol", "NumCellsInRange01", "NumCellsInRange02", "NumCellsInRange03", "NumCellsInRange04", "NumCellsInRange05")]
+
+colnames(simpisoforms) <- c("Chromosome", "Strand", "Position", "Gene.Symbol", "NumCellsInRange01", "NumCellsInRange02", "NumCellsInRange03", "NumCellsInRange04", "NumCellsInRange05")
+
+
+# save the dataframe
+
+write.csv(isoforms, "isoforms.csv")
+
+isoforms <- read.csv("isoforms.csv")
+
+
+
+
+# Filter out the reads already annotated to keep the reads using a new PAS site
+
+samplenames <- c("01","02","03", "04", "05")
+
+
+for (sample in samplenames) {
+  p <- get(paste0("barcode", sample))  # Retrieve the dataframe dynamically
+  
+  # Initialize a vector to keep track of which reads to keep
+  keep <- rep(TRUE, nrow(p))
+  
+  # Loop through unique chromosomes
+  
+  for (chromosome in unique(p$rname)) {
+    
+    cat("Starting", chromosome, "in", paste0("barcode", sample), "\n")
+    # Subset barcode01 dataframe for the current chromosome
+    barcode_subset <- subset(p, rname == chromosome)
+    
+    # Get the corresponding rows from subisoforms dataframe
+    isoforms_subset <- subset(isoforms, Chromosome == chromosome)
+    
+    # Check if rightmost positions fall between position1 and position2 for each row in subisoforms
+    for (j in 1:nrow(isoforms_subset)) {
+      position1 <- isoforms_subset$Position_minus_10[j]
+      position2 <- isoforms_subset$Position_plus_10[j]
+      
+      # Find indices of barcode_subset that are within the range
+      in_range <- (barcode_subset$rightmostposition >= position1) & (barcode_subset$rightmostposition <= position2)
+      
+      # Update the keep vector to mark these reads as FALSE (not to be kept)
+      keep[which(p$rname == chromosome)[in_range]] <- FALSE
+    }
+  }
+  
+  # Create the new dataframe with reads that do not fall within any of the ranges
+  assign(paste0("new", sample), p[keep, ])
+}
+
+
+# Save the new dataframes
+
+write.csv(new01, "new01.csv")
+write.csv(new02, "new02.csv")
+write.csv(new03, "new03.csv")
+write.csv(new04, "new04.csv")
+write.csv(new05, "new05.csv")
+new01 <- read.csv("new01.csv")
+new02 <- read.csv("new02.csv")
+new03 <- read.csv("new03.csv")
+new04 <- read.csv("new04.csv")
+new05 <- read.csv("new05.csv")
+
+
+
+
+# Create a function to find the gene symbol based on the chromosome, position, and strand
+
+find_gene_symbol <- function(chromosome, position, strand, buffer = 200) {
+  
+  extended_start <- genomeannotation$start - buffer
+  extended_end <- genomeannotation$end + buffer
+  
+  
+  
+  # Find the index of the gene that the position falls within the extended range
+  index <- which(
+    genomeannotation$seqnames == chromosome & 
+      extended_start <= position & 
+      extended_end >= position & 
+      genomeannotation$strand == strand
+  )
+  
+  # Return the gene symbol if a match is found, otherwise return NA
+  if (length(index) > 0) {
+    return(genomeannotation$gene_id[index[1]])
+  } else {
+    return(NA)
+  }
+}
+
+
+# Iterate over the unannotated reads to find the gene symbol
+
+new01$genesymbol <- mapply(
+  function(chr, fp, rp, s) {
+    gene_fp <- find_gene_symbol(chr, fp, s)
+    
+    return(gene_fp)
+  },
+  new01$rname,
+  new01$pos,
+  new01$rightmostposition,
+  new01$strand
+)
+
+
+new02$genesymbol <- mapply(
+  function(chr, fp, rp, s) {
+    gene_fp <- find_gene_symbol(chr, fp, s)
+    
+    return(gene_fp)
+    
+  },
+  new02$rname,
+  new02$pos,
+  new02$rightmostposition,
+  new02$strand
+)
+
+new03$genesymbol <- mapply(
+  function(chr, fp, rp, s) {
+    gene_fp <- find_gene_symbol(chr, fp, s)
+    
+    return(gene_fp)
+    
+  },
+  new03$rname,
+  new03$pos,
+  new03$rightmostposition,
+  new03$strand
+)
+
+new04$genesymbol <- mapply(
+  function(chr, fp, rp, s) {
+    gene_fp <- find_gene_symbol(chr, fp, s)
+    
+    return(gene_fp)
+    
+  },
+  new04$rname,
+  new04$pos,
+  new04$rightmostposition,
+  new04$strand
+)
+
+new05$genesymbol <- mapply(
+  function(chr, fp, rp, s) {
+    gene_fp <- find_gene_symbol(chr, fp, s)
+    
+    return(gene_fp)
+    
+  },
+  new05$rname,
+  new05$pos,
+  new05$rightmostposition,
+  new05$strand
+)
+
+
+
+
+
+
+### Turn the positions to genomic ranges and cluster them
+
+
+gr_new01 <- GRanges(
+  seqnames = new01$rname,
+  ranges = IRanges(start = new01$rightmostposition, end = new01$rightmostposition),
+  strand = new01$strand
+)
+
+
+
+# Reduce the GRanges to create clusters with a maximum gap of 20 nucleotides
+clusters01 <- reduce(gr_new01, min.gapwidth = 20)
+
+# Find overlaps between the original reads and the clusters
+overlaps01 <- findOverlaps(gr_new01, clusters01)
+
+# Extract cluster information
+new01$Cluster <- subjectHits(overlaps01)
+
+# Calculate median rightmost position for each cluster
+clusterpositions01 <- tapply(new01$rightmostposition, new01$Cluster, function(x) mean(range(x)))
+
+# Map median values back to original dataframe
+new01$clusterpos <- clusterpositions01[new01$Cluster]
+
+
+cluster_sizes01 <- tapply(seq_along(new01$rname), new01$Cluster, function(x) length(unique(x)))
+
+
+newhumanpas01 <- data.frame(
+  chromosome = new01$rname,
+  genesymbol = new01$genesymbol,
+  position = new01$clusterpos,
+  clustersize = cluster_sizes01[as.character(new01$Cluster)]
+)
+
+newhumanpas01 <- unique(newhumanpas01, keep.all = TRUE)
+
+newhumanpas01$position <- trunc(newhumanpas01$position)
+
+
+gr_new02 <- GRanges(
+  seqnames = new02$rname,
+  ranges = IRanges(start = new02$rightmostposition, end = new02$rightmostposition),
+  strand = new02$strand
+)
+
+
+
+# Reduce the GRanges to create clusters with a maximum gap of 20 nucleotides
+clusters02 <- reduce(gr_new02, min.gapwidth = 20)
+
+# Find overlaps between the original reads and the clusters
+overlaps02 <- findOverlaps(gr_new02, clusters02)
+
+# Extract cluster information
+new02$Cluster <- subjectHits(overlaps02)
+
+# Calculate median rightmost position for each cluster
+clusterpositions02 <- tapply(new02$rightmostposition, new02$Cluster, function(x) mean(range(x)))
+
+# Map median values back to original dataframe
+new02$clusterpos <- clusterpositions02[new02$Cluster]
+
+
+cluster_sizes02 <- tapply(seq_along(new02$rname), new02$Cluster, function(x) length(unique(x)))
+
+
+newhumanpas02 <- data.frame(
+  chromosome = new02$rname,
+  genesymbol = new02$genesymbol,
+  position = new02$clusterpos,
+  clustersize = cluster_sizes02[as.character(new02$Cluster)]
+)
+
+newhumanpas02 <- unique(newhumanpas02, keep.all = TRUE)
+
+newhumanpas02$position <- trunc(newhumanpas02$position)
+
+
+
+gr_new03 <- GRanges(
+  seqnames = new03$rname,
+  ranges = IRanges(start = new03$rightmostposition, end = new03$rightmostposition),
+  strand = new03$strand
+)
+
+
+
+# Reduce the GRanges to create clusters with a maximum gap of 20 nucleotides
+clusters03 <- reduce(gr_new03, min.gapwidth = 20)
+
+# Find overlaps between the original reads and the clusters
+overlaps03 <- findOverlaps(gr_new03, clusters03)
+
+# Extract cluster information
+new03$Cluster <- subjectHits(overlaps03)
+
+# Calculate median rightmost position for each cluster
+clusterpositions03 <- tapply(new03$rightmostposition, new03$Cluster, function(x) mean(range(x)))
+
+# Map median values back to original dataframe
+new03$clusterpos <- clusterpositions03[new03$Cluster]
+
+
+cluster_sizes03 <- tapply(seq_along(new03$rname), new03$Cluster, function(x) length(unique(x)))
+
+
+newhumanpas03 <- data.frame(
+  chromosome = new03$rname,
+  genesymbol = new03$genesymbol,
+  position = new03$clusterpos,
+  clustersize = cluster_sizes03[as.character(new03$Cluster)]
+)
+
+newhumanpas03 <- unique(newhumanpas03, keep.all = TRUE)
+
+newhumanpas03$position <- trunc(newhumanpas03$position)
+
+
+
+
+
+gr_new04 <- GRanges(
+  seqnames = new04$rname,
+  ranges = IRanges(start = new04$rightmostposition, end = new04$rightmostposition),
+  strand = new04$strand
+)
+
+
+
+# Reduce the GRanges to create clusters with a maximum gap of 20 nucleotides
+clusters04 <- reduce(gr_new04, min.gapwidth = 20)
+
+# Find overlaps between the original reads and the clusters
+overlaps04 <- findOverlaps(gr_new04, clusters04)
+
+# Extract cluster information
+new04$Cluster <- subjectHits(overlaps04)
+
+# Calculate median rightmost position for each cluster
+clusterpositions04 <- tapply(new04$rightmostposition, new04$Cluster, function(x) mean(range(x)))
+
+# Map median values back to original dataframe
+new04$clusterpos <- clusterpositions04[new04$Cluster]
+
+
+cluster_sizes04 <- tapply(seq_along(new04$rname), new04$Cluster, function(x) length(unique(x)))
+
+
+newhumanpas04 <- data.frame(
+  chromosome = new04$rname,
+  genesymbol = new04$genesymbol,
+  position = new04$clusterpos,
+  clustersize = cluster_sizes04[as.character(new04$Cluster)]
+)
+
+newhumanpas04 <- unique(newhumanpas04, keep.all = TRUE)
+
+newhumanpas04$position <- trunc(newhumanpas04$position)
+
+
+gr_new05 <- GRanges(
+  seqnames = new05$rname,
+  ranges = IRanges(start = new05$rightmostposition, end = new05$rightmostposition),
+  strand = new05$strand
+)
+
+
+
+# Reduce the GRanges to create clusters with a maximum gap of 20 nucleotides
+clusters05 <- reduce(gr_new05, min.gapwidth = 20)
+
+# Find overlaps between the original reads and the clusters
+overlaps05 <- findOverlaps(gr_new05, clusters05)
+
+# Extract cluster information
+new05$Cluster <- subjectHits(overlaps05)
+
+# Calculate median rightmost position for each cluster
+clusterpositions05 <- tapply(new05$rightmostposition, new05$Cluster, function(x) mean(range(x)))
+
+# Map median values back to original dataframe
+new05$clusterpos <- clusterpositions05[new05$Cluster]
+
+
+cluster_sizes05 <- tapply(seq_along(new05$rname), new05$Cluster, function(x) length(unique(x)))
+
+
+newhumanpas05 <- data.frame(
+  chromosome = new05$rname,
+  genesymbol = new05$genesymbol,
+  position = new05$clusterpos,
+  clustersize = cluster_sizes05[as.character(new05$Cluster)]
+)
+
+newhumanpas05 <- unique(newhumanpas05, keep.all = TRUE)
+
+newhumanpas05$position <- trunc(newhumanpas05$position)
+
+
+
+# Save the new dataframes
+
+
+write.csv(newhumanpas01,"newhumanpas01.csv")
+write.csv(newhumanpas02,"newhumanpas02.csv")
+write.csv(newhumanpas03,"newhumanpas03.csv")
+write.csv(newhumanpas04,"newhumanpas04.csv")
+write.csv(newhumanpas05,"newhumanpas05.csv")
+
+newhumanpas01 <- read.csv("newhumanpas01.csv")
+newhumanpas02 <- read.csv("newhumanpas02.csv")
+newhumanpas03 <- read.csv("newhumanpas03.csv")
+newhumanpas04 <- read.csv("newhumanpas04.csv")
+newhumanpas05 <- read.csv("newhumanpas05.csv")
+
+
+
+### Now to expand the annotation
+
+
+newpas <- rbind(new01,new02,new03,new04,new05)
+
+
+
+
+gr_newpas <- GRanges(
+  seqnames = newpas$rname,
+  ranges = IRanges(start = newpas$rightmostposition, end = newpas$rightmostposition),
+  strand = newpas$strand
+)
+
+
+
+# Reduce the GRanges to create clusters with a maximum gap of 20 nucleotides
+clusterst <- reduce(gr_newpas, min.gapwidth = 20)
+
+# Find overlaps between the original reads and the clusters
+overlapst <- findOverlaps(gr_newpas, clusterst)
+
+# Extract cluster information
+newpas$Cluster <- subjectHits(overlapst)
+
+# Calculate median rightmost position for each cluster
+clusterpositionst <- tapply(newpas$rightmostposition, newpas$Cluster, function(x) mean(range(x)))
+
+# Map median values back to original dataframe
+newpas$clusterpos <- clusterpositionst[newpas$Cluster]
+
+
+cluster_sizest <- tapply(seq_along(newpas$rname), newpas$Cluster, function(x) length(unique(x)))
+
+
+newhumanpas <- data.frame(
+  chromosome = newpas$rname,
+  genesymbol = newpas$genesymbol,
+  position = newpas$clusterpos,
+  clustersize = cluster_sizest[as.character(newpas$Cluster)]
+)
+
+newhumanpas <- unique(newhumanpas, keep.all = TRUE)
+
+newhumanpas$position <- trunc(newhumanpas$position)
+
+
+write.csv(newhumanpas,'newhumanpas.csv')
+
+
+
+
+##To get the reads in the new annotation
+
+# Initialize the description data frame with the correct number of rows and a dummy column
+descriptionnew <- data.frame(num = 1:45876)
+
+# Ensure the Position column is numeric and assign it to description
+descriptionnew$Position <- as.numeric(as.character(newhumanpas$position))
+
+# Remove the initial dummy column
+descriptionnew$num <- NULL
+
+# Create columns for Position - 10 and Position + 10
+descriptionnew$Position_minus_10 <- descriptionnew$Position - 10
+descriptionnew$Position_plus_10 <- descriptionnew$Position + 10
+
+# Initialize a new column for the number of cells
+descriptionnew$NumCellsInRange01 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in new01$rightmostposition) {
+  within_range <- (read_position >= descriptionnew$Position_minus_10) & (read_position <= descriptionnew$Position_plus_10)
+  descriptionnew$NumCellsInRange01[within_range] <- descriptionnew$NumCellsInRange01[within_range] + 1
+}
+
+# Initialize a new column for the number of cells
+descriptionnew$NumCellsInRange02 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in new02$rightmostposition) {
+  within_range <- (read_position >= descriptionnew$Position_minus_10) & (read_position <= descriptionnew$Position_plus_10)
+  descriptionnew$NumCellsInRange02[within_range] <- descriptionnew$NumCellsInRange02[within_range] + 1
+}
+
+
+# Initialize a new column for the number of cells
+descriptionnew$NumCellsInRange03 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in new03$rightmostposition) {
+  within_range <- (read_position >= descriptionnew$Position_minus_10) & (read_position <= descriptionnew$Position_plus_10)
+  descriptionnew$NumCellsInRange03[within_range] <- descriptionnew$NumCellsInRange03[within_range] + 1
+}
+
+# Initialize a new column for the number of cells
+descriptionnew$NumCellsInRange04 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in new04$rightmostposition) {
+  within_range <- (read_position >= descriptionnew$Position_minus_10) & (read_position <= descriptionnew$Position_plus_10)
+  descriptionnew$NumCellsInRange04[within_range] <- descriptionnew$NumCellsInRange04[within_range] + 1
+}
+
+
+# Initialize a new column for the number of cells
+descriptionnew$NumCellsInRange05 <- 0
+
+# Count the number of cells within the range for each gene
+for (read_position in new05$rightmostposition) {
+  within_range <- (read_position >= descriptionnew$Position_minus_10) & (read_position <= descriptionnew$Position_plus_10)
+  descriptionnew$NumCellsInRange05[within_range] <- descriptionnew$NumCellsInRange05[within_range] + 1
+}
+
+
+
+# Treat and simplify the data
+
+descriptionnew$Position <- as.integer(descriptionnew$Position)
+
+isoformsnew <- cbind(newhumanpas, descriptionnew[, -1])
+
+isoformsnew$clustersize <- NULL
+
+
+simpisoformsnew <- isoformsnew[,c("chromosome", "Strand", "position", "genesymbol", "NumCellsInRange01", "NumCellsInRange02", "NumCellsInRange03", "NumCellsInRange04", "NumCellsInRange05")]
+
+colnames(simpisoformsnew) <- c("Chromosome", "Strand", "Position", "Gene.Symbol", "NumCellsInRange01", "NumCellsInRange02", "NumCellsInRange03", "NumCellsInRange04", "NumCellsInRange05")
+
+
+# Save
+
+write.csv(isoformsnew, "isoformsnew.csv")
+isoformsnew <- read.csv("isoformsnew.csv")
+
+
+
+# Join the two dataframes together
+
+totalisoforms <- rbind(simpisoforms, simpisoformsnew)
+
+
+# Save 
+
+write.csv(totalisoforms,"totalisoforms.csv")
+
+totalisoforms <- read.csv("totalisoforms.csv")
+
+
+
+
+
+
+
+
+
+
+#### To treat the MRE annotation for the long non-coding genes, long intergenic non-coding genes, and mRNAs
+
+
+
+#filter the dataframe and transform the data
+
+lnctargets <- mrelinglnc[, c(2,3,7,13,17)]
+mrnatargets <- mremrna[, c(2,3,7,13,17)]
+
+
+lnctargets <- lnctargets %>%
+  separate(V2, into = c("ensembl_gene_id", "transcript", "chromosome", "strand"), sep = "_") %>%
+  separate(V3, into = c("a", "b","start", "finish"), sep = "_")
+lnctargets$length <- lnctargets$V13
+lnctargets$a <- NULL
+lnctargets$b <- NULL
+lnctargets$V13 <- NULL
+lnctargets$start <- as.numeric(lnctargets$start)
+lnctargets$finish <- as.numeric(lnctargets$finish)
+
+
+mrnatargets <- mrnatargets %>%
+  separate(V2, into = c("ensembl_gene_id", "transcript", "chromosome", "strand"), sep = "_") %>%
+  separate(V3, into = c("a", "b","start", "finish"), sep = "_")
+mrnatargets$length <- mrnatargets$V13
+mrnatargets$a <- NULL
+mrnatargets$b <- NULL
+mrnatargets$V13 <- NULL
+mrnatargets$start <- as.numeric(mrnatargets$start)
+mrnatargets$finish <- as.numeric(mrnatargets$finish)
+
+
+
+# Change the chromosome naming system
+
+chromosome_mapping <- c(
+  "1" = "chr1",
+  "2" = "chr2",
+  "3" = "chr3",
+  "4" = "chr4",
+  "5" = "chr5",
+  "6" = "chr6",
+  "7" = "chr7",
+  "8" = "chr8",
+  "9" = "chr9",
+  "10" = "chr10",
+  "11" = "chr11",
+  "12" = "chr12",
+  "13" = "chr13",
+  "14" = "chr14",
+  "15" = "chr15",
+  "16" = "chr16",
+  "17" = "chr17",
+  "18" = "chr18",
+  "19" = "chr19",
+  "20" = "chr20",
+  "21" = "chr21",
+  "22" = "chr22",
+  "X" = "chrX",
+  "Y" = "chrY"
+)
+
+lnctargets <- lnctargets %>%
+  mutate(chromosome = recode(chromosome, !!!chromosome_mapping))
+
+
+mrnatargets <- mrnatargets %>%
+  mutate(chromosome = recode(chromosome, !!!chromosome_mapping))
+
+
+
+
+
+#convert the positions to positions in the chromosomes
+
+#ensembl96 is used but it is unavailable so i'll use 98 and assume the changes are minor
+
+ensembl98 <- useMart(biomart = "ensembl", host = "https://sep2019.archive.ensembl.org")
+dataset98 <- useDataset("hsapiens_gene_ensembl", mart = ensembl98)
+
+genelnc <- as.data.frame(getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",
+  values = lnctargets$ensembl_gene_id,
+  mart = dataset98
+))
+
+lnctargets <- merge(lnctargets, genelnc, by = "ensembl_gene_id", all.x = TRUE)
+
+genemrna <- as.data.frame(getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",
+  values = mrnatargets$ensembl_gene_id,
+  mart = dataset98
+))
+
+mrnatargets <- merge(mrnatargets, genemrna, by = "ensembl_gene_id", all.x = TRUE)
+
+
+mrnatargets <- unique(mrnatargets)
+
+mrnatargets <- mrnatargets %>%
+  group_by(ensembl_gene_id) %>%
+  distinct(V7, .keep_all = TRUE) %>%
+  ungroup()
+
+
+lnctargets <- unique(lnctargets)
+lnctargets <- lnctargets %>%
+  group_by(ensembl_gene_id) %>%
+  distinct(V7, .keep_all = TRUE) %>%
+  ungroup()
+
+
+
+
+## Extract exon information
+
+exon_infolnc <- getBM(
+  attributes = c("ensembl_transcript_id", "exon_chrom_start", "exon_chrom_end", "rank"),
+  filters = "ensembl_transcript_id",
+  values = lnctargets$transcript,
+  mart = dataset98
+)
+
+exon_infomrna <- getBM(
+  attributes = c("ensembl_transcript_id", "exon_chrom_start", "exon_chrom_end", "rank"),
+  filters = "ensembl_transcript_id",
+  values = mrnatargets$transcript,
+  mart = dataset98
+)
+
+
+
+
+### Create a function to take the position in the cDNA and convert it to the genomic position
+
+
+map_cdna_to_genome <- function(cdna_start, cdna_end, exon_info, strand) {
+  # Initialize variables to store results
+  genomic_start <- NA
+  genomic_end <- NA
+  
+  # Split exon_info by transcript ID
+  transcripts <- split(exon_info, exon_info$ensembl_transcript_id)
+  
+  # Loop over each transcript
+  for (transcript_id in names(transcripts)) {
+    # Extract exons for the current transcript
+    current_exons <- transcripts[[transcript_id]]
+    
+    # Sort exons by their rank (order in transcript)
+    current_exons <- current_exons[order(current_exons$rank), ]
+    
+    # Calculate cumulative lengths of exons in cDNA coordinates
+    current_exons$cumulative_cdna_start <- cumsum(c(0, head(current_exons$exon_chrom_end - current_exons$exon_chrom_start + 1, -1)))
+    
+    # Determine the exons containing the cDNA start and end positions
+    start_exon_idx <- which(cdna_start <= current_exons$cumulative_cdna_start + (current_exons$exon_chrom_end - current_exons$exon_chrom_start + 1))[1]
+    end_exon_idx <- which(cdna_end <= current_exons$cumulative_cdna_start + (current_exons$exon_chrom_end - current_exons$exon_chrom_start + 1))[1]
+    
+    if (!is.na(start_exon_idx) && !is.na(end_exon_idx)) {
+      if (strand == "1") {
+        # Positive strand calculation
+        genomic_start <- current_exons$exon_chrom_start[start_exon_idx] + (cdna_start - current_exons$cumulative_cdna_start[start_exon_idx]) - 1
+        genomic_end <- current_exons$exon_chrom_start[end_exon_idx] + (cdna_end - current_exons$cumulative_cdna_start[end_exon_idx]) - 1
+      } else if (strand == "-1") {
+        # Negative strand calculation
+        genomic_start <- current_exons$exon_chrom_end[start_exon_idx] - (cdna_start - current_exons$cumulative_cdna_start[start_exon_idx]) + 1
+        genomic_end <- current_exons$exon_chrom_end[end_exon_idx] - (cdna_end - current_exons$cumulative_cdna_start[end_exon_idx]) + 1
+      }
+      
+      # Ensure that genomic_start is always less than genomic_end
+      if (genomic_start > genomic_end) {
+        temp <- genomic_start
+        genomic_start <- genomic_end
+        genomic_end <- temp
+      }
+      
+      break # Exit loop once the correct transcript is found
+    }
+  }
+  
+  return(list(genomic_start = genomic_start, genomic_end = genomic_end))
+}
+
+
+
+## Create a function to generate filler data
+
+
+create_filler_df <- function(num_cols) {
+  filler_data <- matrix("Filler", nrow = 1, ncol = num_cols)
+  colnames(filler_data) <- c("genomic_start","genomic_end")
+  as.data.frame(filler_data, stringsAsFactors = FALSE)
+}
+
+
+
+## Apply the functions
+
+resultslnc <- lapply(1:nrow(lnctargets), function(i) {
+  transcript_id <- lnctargets$transcript[i]
+  strand <- lnctargets$strand[i]  # Extract strand information
+  
+  # Check if transcript_id exists in exon_info
+  if (transcript_id %in% exon_infolnc$ensembl_transcript_id) {
+    # Filter exon_info for the specific transcript_id
+    transcript_exons <- exon_infolnc[exon_infolnc$ensembl_transcript_id == transcript_id, ]
+    
+    # Call map_cdna_to_genome with the strand information
+    map_cdna_to_genome(lnctargets$start[i], lnctargets$finish[i], transcript_exons, strand)
+  } else {
+    # Handle case where transcript_id is not found in exon_info
+    message(paste("Transcript ID", transcript_id, "not found in exon_info. Skipping."))
+    create_filler_df(num_cols = 2)
+  }
+})
+
+
+
+resultsmrna <- lapply(1:nrow(mrnatargets), function(i) {
+  transcript_id <- mrnatargets$transcript[i]
+  strand <- mrnatargets$strand[i]  # Extract strand information
+  
+  # Check if transcript_id exists in exon_info
+  if (transcript_id %in% exon_infomrna$ensembl_transcript_id) {
+    # Filter exon_info for the specific transcript_id
+    transcript_exons <- exon_infomrna[exon_infomrna$ensembl_transcript_id == transcript_id, ]
+    
+    # Call map_cdna_to_genome for the filtered exon_info
+    map_cdna_to_genome(mrnatargets$start[i], mrnatargets$finish[i], transcript_exons,strand)
+  } else {
+    # Handle case where transcript_id is not found in exon_info
+    # You can choose to return NULL or any other appropriate value
+    message(paste("Transcript ID", transcript_id, "not found in exon_info. Skipping."))
+    create_filler_df(num_cols = 2)
+  }
+})
+
+
+
+
+
+
+
+# Combine results into a data frame
+results_dflnc <- do.call(rbind, lapply(resultslnc, as.data.frame))
+results_dflnc <- cbind(lnctargets, results_dflnc)
+
+
+
+
+results_dfmrna <- do.call(rbind, lapply(resultsmrna, as.data.frame))
+results_dfmrna <- cbind(mrnatargets, results_dfmrna)
+
+
+
+
+## Save the results
+
+write.csv(results_dflnc, "resultslnc.csv")
+write.csv(results_dfmrna, "resultsmrna.csv")
+
+
+## Join the dataframes together
+
+mre <- rbind(results_dfmrna, results_dflnc)
+
+
+# Eliminate duplicates
+
+uniquemre <- unique(mre)
+uniquemre <- uniquemre[!duplicated(uniquemre$genomic_start),]
+
+
+# Save and re-read 
+write.csv(uniquemre, "mre.csv")
+
+
+mre <- read.csv("mre.csv")
+
+
+
+
+### Filter the data to keep only the annotations in the 3' UTR
+
+
+
+# Get the position information
+
+gene_cds <- getBM(
+  attributes = c("ensembl_gene_id", "ensembl_transcript_id", "external_gene_name", "chromosome_name", "rank", "genomic_coding_start", "genomic_coding_end"),
+  mart = dataset98
+)
+
+
+# Keep only the last exon
+
+filtered_gene_cds <- gene_cds %>%
+  group_by(ensembl_transcript_id) %>%
+  filter(rank == max(rank)) %>%
+  ungroup()
+
+
+# Treat and refilter data
+
+filtered_gene_cds <- filtered_gene_cds[!is.na(filtered_gene_cds$genomic_coding_end) & !is.na(filtered_gene_cds$genomic_coding_start),]
+filtered_gene_cds$transcript <- filtered_gene_cds$ensembl_transcript_id
+
+
+# Add the position information to the MRE dataframe
+
+merged_data <- merge(mre, filtered_gene_cds, by = "transcript")
+
+utr_mre_data <- merged_data %>%
+  filter(
+    (strand == "1" & genomic_start > genomic_coding_end) |
+      (strand == "-1" & genomic_end < genomic_coding_start)
+  )
+
+
+# Save
+write.csv(utr_mre_data, "3utrmre.csv")
+
+
+mre <- read.csv("3utrmre.csv")
+
+
+
+
+
+
+
+
+#### miRNA Regulation
+
+
+
+# Create a function to calculate the proportion of MREs expressed in the first sample
+
+calculate_mirna_regulation01 <- function(isoforms_df, mre_df) {
+  
+  genes <- unique(isoforms_df$Gene.Symbol)
+  results <- data.frame(gene_id = character(), combined_measure = numeric(), stringsAsFactors = FALSE)
+  
+  for (gene in genes) {
+    # Subset isoforms and MREs for the current gene
+    gene_isoforms <- subset(isoforms_df, Gene.Symbol == gene)
+    gene_mres <- subset(mre_df, hgnc_symbol == gene)
+    
+    # Check if gene_isoforms or gene_mres is empty
+    if (nrow(gene_isoforms) == 0 | nrow(gene_mres) == 0) {
+      next
+    }
+    
+    # Calculate relative abundance of each isoform
+    gene_isoforms$isoform_percentage <- gene_isoforms$NumCellsInRange01 / sum(gene_isoforms$NumCellsInRange01)
+    
+    # Initialize the column for MRE fraction
+    gene_isoforms$mre_fraction <- 0
+    
+    for (i in 1:nrow(gene_isoforms)) {
+      isoform_end <- gene_isoforms$Position[i]
+      strand <- gene_mres$strand
+      
+      # Determine the fraction of MREs included
+      mre_included <- ifelse((strand == "1" & gene_mres$genomic_end <= isoform_end) | 
+                               (strand == "-1" & gene_mres$genomic_start >= isoform_end), 1, 0)
+      
+      gene_isoforms$mre_fraction[i] <- sum(mre_included) / nrow(gene_mres)
+    }
+    
+    # Calculate the combined measure
+    gene_isoforms$combined_measure <- gene_isoforms$isoform_percentage * gene_isoforms$mre_fraction
+    
+    # Sum the combined measures for the current gene
+    combined_measure <- sum(gene_isoforms$combined_measure)
+    
+    # Store the result
+    results <- rbind(results, data.frame(gene_id = gene, combined_measure = combined_measure))
+  }
+  
+  return(results)
+}
+
+
+# Apply the function 
+result01 <- calculate_mirna_regulation01(totalisoforms,mre)
+
+
+write.csv(result01, 'result01.csv')
+
+
+
+
+# Create a function to calculate the proportion of MREs expressed in the second sample
+
+
+
+calculate_mirna_regulation02 <- function(isoforms_df, mre_df) {
+  
+  genes <- unique(isoforms_df$Gene.Symbol)
+  results <- data.frame(gene_id = character(), combined_measure = numeric(), stringsAsFactors = FALSE)
+  
+  for (gene in genes) {
+    # Subset isoforms and MREs for the current gene
+    gene_isoforms <- subset(isoforms_df, Gene.Symbol == gene)
+    gene_mres <- subset(mre_df, hgnc_symbol == gene)
+    
+    # Check if gene_isoforms or gene_mres is empty
+    if (nrow(gene_isoforms) == 0 | nrow(gene_mres) == 0) {
+      next
+    }
+    
+    # Calculate relative abundance of each isoform
+    gene_isoforms$isoform_percentage <- gene_isoforms$NumCellsInRange02 / sum(gene_isoforms$NumCellsInRange02)
+    
+    # Initialize the column for MRE fraction
+    gene_isoforms$mre_fraction <- 0
+    
+    for (i in 1:nrow(gene_isoforms)) {
+      isoform_end <- gene_isoforms$Position[i]
+      strand <- gene_mres$strand
+      
+      # Determine the fraction of MREs included
+      mre_included <- ifelse((strand == "1" & gene_mres$genomic_end <= isoform_end) | 
+                               (strand == "-1" & gene_mres$genomic_start >= isoform_end), 1, 0)
+      
+      gene_isoforms$mre_fraction[i] <- sum(mre_included) / nrow(gene_mres)
+    }
+    
+    # Calculate the combined measure
+    gene_isoforms$combined_measure <- gene_isoforms$isoform_percentage * gene_isoforms$mre_fraction
+    
+    # Sum the combined measures for the current gene
+    combined_measure <- sum(gene_isoforms$combined_measure)
+    
+    # Store the result
+    results <- rbind(results, data.frame(gene_id = gene, combined_measure = combined_measure))
+  }
+  
+  return(results)
+}
+
+
+result02 <- calculate_mirna_regulation02(totalisoforms,mre)
+write.csv(result02, 'result02.csv')
+
+
+
+# Create a function to calculate the proportion of MREs expressed in the third sample
+
+calculate_mirna_regulation03 <- function(isoforms_df, mre_df) {
+  
+  genes <- unique(isoforms_df$Gene.Symbol)
+  results <- data.frame(gene_id = character(), combined_measure = numeric(), stringsAsFactors = FALSE)
+  
+  for (gene in genes) {
+    # Subset isoforms and MREs for the current gene
+    gene_isoforms <- subset(isoforms_df, Gene.Symbol == gene)
+    gene_mres <- subset(mre_df, hgnc_symbol == gene)
+    
+    # Check if gene_isoforms or gene_mres is empty
+    if (nrow(gene_isoforms) == 0 | nrow(gene_mres) == 0) {
+      next
+    }
+    
+    # Calculate relative abundance of each isoform
+    gene_isoforms$isoform_percentage <- gene_isoforms$NumCellsInRange03 / sum(gene_isoforms$NumCellsInRange03)
+    
+    # Initialize the column for MRE fraction
+    gene_isoforms$mre_fraction <- 0
+    
+    for (i in 1:nrow(gene_isoforms)) {
+      isoform_end <- gene_isoforms$Position[i]
+      strand <- gene_mres$strand
+      
+      # Determine the fraction of MREs included
+      mre_included <- ifelse((strand == "1" & gene_mres$genomic_end <= isoform_end) | 
+                               (strand == "-1" & gene_mres$genomic_start >= isoform_end), 1, 0)
+      
+      gene_isoforms$mre_fraction[i] <- sum(mre_included) / nrow(gene_mres)
+    }
+    
+    # Calculate the combined measure
+    gene_isoforms$combined_measure <- gene_isoforms$isoform_percentage * gene_isoforms$mre_fraction
+    
+    # Sum the combined measures for the current gene
+    combined_measure <- sum(gene_isoforms$combined_measure)
+    
+    # Store the result
+    results <- rbind(results, data.frame(gene_id = gene, combined_measure = combined_measure))
+  }
+  
+  return(results)
+}
+
+
+result03 <- calculate_mirna_regulation03(totalisoforms,mre)
+write.csv(result03, 'result03.csv')
+
+
+
+# Create a function to calculate the proportion of MREs expressed in the fourth sample
+
+calculate_mirna_regulation04 <- function(isoforms_df, mre_df) {
+  
+  genes <- unique(isoforms_df$Gene.Symbol)
+  results <- data.frame(gene_id = character(), combined_measure = numeric(), stringsAsFactors = FALSE)
+  
+  for (gene in genes) {
+    # Subset isoforms and MREs for the current gene
+    gene_isoforms <- subset(isoforms_df, Gene.Symbol == gene)
+    gene_mres <- subset(mre_df, hgnc_symbol == gene)
+    
+    # Check if gene_isoforms or gene_mres is empty
+    if (nrow(gene_isoforms) == 0 | nrow(gene_mres) == 0) {
+      next
+    }
+    
+    # Calculate relative abundance of each isoform
+    gene_isoforms$isoform_percentage <- gene_isoforms$NumCellsInRange04 / sum(gene_isoforms$NumCellsInRange04)
+    
+    # Initialize the column for MRE fraction
+    gene_isoforms$mre_fraction <- 0
+    
+    for (i in 1:nrow(gene_isoforms)) {
+      isoform_end <- gene_isoforms$Position[i]
+      strand <- gene_mres$strand
+      
+      # Determine the fraction of MREs included
+      mre_included <- ifelse((strand == "1" & gene_mres$genomic_end <= isoform_end) | 
+                               (strand == "-1" & gene_mres$genomic_start >= isoform_end), 1, 0)
+      
+      gene_isoforms$mre_fraction[i] <- sum(mre_included) / nrow(gene_mres)
+    }
+    
+    # Calculate the combined measure
+    gene_isoforms$combined_measure <- gene_isoforms$isoform_percentage * gene_isoforms$mre_fraction
+    
+    # Sum the combined measures for the current gene
+    combined_measure <- sum(gene_isoforms$combined_measure)
+    
+    # Store the result
+    results <- rbind(results, data.frame(gene_id = gene, combined_measure = combined_measure))
+  }
+  
+  return(results)
+}
+
+
+result04 <- calculate_mirna_regulation04(totalisoforms,mre)
+write.csv(result04, 'result04.csv')
+
+
+
+
+# Create a function to calculate the proportion of MREs expressed in the fifth sample
+
+
+calculate_mirna_regulation05 <- function(isoforms_df, mre_df) {
+  
+  genes <- unique(isoforms_df$Gene.Symbol)
+  results <- data.frame(gene_id = character(), combined_measure = numeric(), stringsAsFactors = FALSE)
+  
+  for (gene in genes) {
+    # Subset isoforms and MREs for the current gene
+    gene_isoforms <- subset(isoforms_df, Gene.Symbol == gene)
+    gene_mres <- subset(mre_df, hgnc_symbol == gene)
+    
+    # Check if gene_isoforms or gene_mres is empty
+    if (nrow(gene_isoforms) == 0 | nrow(gene_mres) == 0) {
+      next
+    }
+    
+    # Calculate relative abundance of each isoform
+    gene_isoforms$isoform_percentage <- gene_isoforms$NumCellsInRange05 / sum(gene_isoforms$NumCellsInRange05)
+    
+    # Initialize the column for MRE fraction
+    gene_isoforms$mre_fraction <- 0
+    
+    for (i in 1:nrow(gene_isoforms)) {
+      isoform_end <- gene_isoforms$Position[i]
+      strand <- gene_mres$strand
+      
+      # Determine the fraction of MREs included
+      mre_included <- ifelse((strand == "1" & gene_mres$genomic_end <= isoform_end) | 
+                               (strand == "-1" & gene_mres$genomic_start >= isoform_end), 1, 0)
+      
+      gene_isoforms$mre_fraction[i] <- sum(mre_included) / nrow(gene_mres)
+    }
+    
+    # Calculate the combined measure
+    gene_isoforms$combined_measure <- gene_isoforms$isoform_percentage * gene_isoforms$mre_fraction
+    
+    # Sum the combined measures for the current gene
+    combined_measure <- sum(gene_isoforms$combined_measure)
+    
+    # Store the result
+    results <- rbind(results, data.frame(gene_id = gene, combined_measure = combined_measure))
+  }
+  
+  return(results)
+}
+
+
+result05 <- calculate_mirna_regulation05(totalisoforms,mre)
+write.csv(result05, 'result05.csv')
+
+
+
+# Checkpoint
+
+result01 <- read.csv("result01.csv")
+result02 <- read.csv("result02.csv")
+result03 <- read.csv("result03.csv")
+result04 <- read.csv("result04.csv")
+result05 <- read.csv("result05.csv")
+
+
+
+
+
